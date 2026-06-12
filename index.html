@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>ブロスタ風バトロワ（オンラインマルチ対戦版）</title>
+<style>
+* {
+box-sizing: border-box;
+user-select: none; -webkit-user-select: none; touch-action: none;
+}
+body {
+margin: 0;
+padding: 0; background-color: #111; color: white;
+font-family: sans-serif; width: 100vw; height: 100vh;
+overflow: hidden; display: flex; justify-content: center; align-items: center;
+}
+#orientation-alert {
+position: fixed;
+top: 0; left: 0; width: 100%; height: 100%;
+background: #222; display: flex; flex-direction: column;
+justify-content: center; align-items: center; z-index: 9999;
+}
+@media screen and (orientation: landscape) { #orientation-alert { display: none; } }
+canvas { background-color: #4a7c59; display: block; max-width: 100%; max-height: 100%;
+box-shadow: 0 0 20px rgba(0,0,0,0.8); }
+
+#menu-screen {
+position: absolute;
+width: 100%; height: 100%; background: rgba(20,20,20,0.95);
+display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 100;
+}
+.btn-container { display: flex; gap: 15px; margin-top: 15px; flex-wrap: wrap; justify-content: center; }
+.menu-btn {
+padding: 12px 24px;
+font-size: 16px; font-weight: bold; border: none; border-radius: 10px; cursor: pointer; color: white;
+transition: transform 0.1s;
+}
+.menu-btn:active { transform: scale(0.95); }
+.mode-active { border: 4px solid #fff; box-shadow: 0 0 15px #ffd700; }
+#btn-duel { background: #e53935; }
+#btn-sd { background: #4caf50; }
+#btn-shelly { background: #9c27b0; }
+#btn-colt { background: #2196f3; }
+#btn-elbrown { background: #ff9800; }
+#btn-mortis { background: #4e342e; }
+h3 { margin-bottom: 5px; color: #ccc; }
+</style>
+<script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+<div id="orientation-alert">🔄 画面を横向きに回転させてください</div>
+
+<div id="menu-screen">
+<h2>ブロスタ・オンラインマルチ対戦メニュー</h2>
+
+<h3>1. モードを選択</h3>
+<div class="btn-container">
+<button class="menu-btn mode-active" id="btn-duel">デュエル (1vs1)</button>
+<button class="menu-btn" id="btn-sd">バトルロイヤル (10人戦)</button>
+</div>
+
+<h3 style="margin-top: 20px;">2. キャラクターを選択してスタート</h3>
+<div class="btn-container">
+<button class="menu-btn" id="btn-shelly">シェリー</button>
+<button class="menu-btn" id="btn-colt">コルト</button>
+<button class="menu-btn" id="btn-elbrown">エル・プリモ</button>
+<button class="menu-btn" id="btn-mortis">モーティス</button>
+</div>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+// Socket.ioの初期化接続
+const socket = io();
+
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+const BASE_WIDTH = 854;
+const BASE_HEIGHT = 480;
+canvas.width = BASE_WIDTH;
+canvas.height = BASE_HEIGHT;
+
+function resizeCanvas() {
+const windowRatio = window.innerWidth / window.innerHeight;
+const baseRatio = BASE_WIDTH / BASE_HEIGHT;
+if (windowRatio > baseRatio) {
+canvas.style.width = `${window.innerHeight * baseRatio}px`; canvas.style.height = `${window.innerHeight}px`;
+} else {
+canvas.style.width = `${window.innerWidth}px`; canvas.style.height = `${window.innerWidth / baseRatio}px`;
+}
+}
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('load', resizeCanvas);
+
+let gameState = "SELECT";
+let gameMode = "DUEL";
+let winner = "";
+let brawlers = [];
+let player;
+const bullets = [];
+const walls = [];
+const sandbags = [];
+const cubes = [];
+const shotQueues = [];
+
+let mapWidth = BASE_WIDTH;
+let mapHeight = BASE_HEIGHT;
+let camera = { x: 0, y: 0 };
+
+const WALL_SIZE = 60;
+const CHAR_TYPES = {
+SHELLY: { name: "シェリー", maxHp: 7200, speed: 3.8, radius: 18, color: "#9c27b0", attackType: "SPREAD", range: 190, spreadAngle: 0.35, ultType: "MEGA_SPREAD" },
+COLT: { name: "コルト", maxHp: 6400, speed: 4.2, radius: 16, color: "#2196f3", attackType: "STRAIGHT", range: 290, spreadAngle: 0, ultType: "STRAIGHT_BULLET" },
+ELBROWN: { name: "エル・プリモ", maxHp: 15000, speed: 3.5, radius: 21, color: "#ff9800", attackType: "PUNCH", range: 110, spreadAngle: 0.6, ultType: "JUMP" },
+MORTIS: { name: "モーティス", maxHp: 8000, speed: 4.0, radius: 17, color: "#4e342e", attackType: "DASH", range: 110, spreadAngle: 0, ultType: "BAT_SWARM" }
+};
+
+// ジョイスティッククラス
+class Joystick {
+constructor(isLeft, isUlt = false) {
+this.isLeft = isLeft;
+this.isUlt = isUlt; this.active = false; this.touchId = null;
+this.startX = 0; this.startY = 0; this.currentX = 0;
+this.currentY = 0;
+this.maxRadius = 50; this.inputX = 0; this.inputY = 0; this.moved = false;
+}
+start(id, x, y) {
+if (!player || player.hp <= 0) return;
+this.active = true; this.touchId = id; this.startX = x; this.startY = y;
+this.currentX = x; this.currentY = y;
+this.inputX = 0; this.inputY = 0; this.moved = false;
+if (this.isUlt && player.ultCharge >= 100) player.ultActive = true;
+}
+move(x, y) {
+if (!this.active) return;
+this.currentX = x;
+this.currentY = y;
+let dx = this.currentX - this.startX; let dy = this.currentY - this.startY;
+let distance = Math.hypot(dx, dy);
+if (distance > 10) this.moved = true;
+if (distance > this.maxRadius) {
+let angle = Math.atan2(dy, dx);
+this.currentX = this.startX + Math.cos(angle) * this.maxRadius;
+this.currentY = this.startY + Math.sin(angle) * this.maxRadius;
+dx = this.currentX - this.startX;
+dy = this.currentY - this.startY;
+}
+this.inputX = dx / this.maxRadius;
+this.inputY = dy / this.maxRadius;
+}
+end() {
+if (!this.active) return;
+this.active = false; this.touchId = null;
+if (gameState === "PLAYING" && player && player.hp > 0) {
+if (!this.isLeft) {
+if (this.moved) {
+if (Math.hypot(this.inputX, this.inputY) > 0.3) {
+let pullStrength = Math.hypot(this.inputX, this.inputY);
+fire(player, this.inputX, this.inputY, pullStrength);
+} else { player.ultActive = false; }
+} else {
+if (this.isUlt) {
+if (player.ultCharge >= 100) { player.ultActive = true; fireAutoAim(player); }
+} else { fireAutoAim(player); }
+}
+}
+}
+this.inputX = 0;
+this.inputY = 0;
+}
+draw() {
+if (!this.active || this.isUlt) return;
+ctx.beginPath(); ctx.arc(this.startX, this.startY, this.maxRadius, 0, Math.PI * 2);
+ctx.fillStyle = "rgba(255, 255, 255, 0.15)"; ctx.strokeStyle = this.isLeft ? "rgba(0, 150, 255, 0.5)" : "rgba(255, 50, 50, 0.5)";
+ctx.lineWidth = 3; ctx.fill(); ctx.stroke();
+ctx.beginPath(); ctx.arc(this.currentX, this.currentY, 22, 0, Math.PI * 2);
+ctx.fillStyle = this.isLeft ? "rgba(0, 150, 255, 0.8)" : "rgba(255, 50, 50, 0.8)"; ctx.fill();
+}
+}
+
+const leftStick = new Joystick(true);
+const rightStick = new Joystick(false);
+const ultStick = new Joystick(false, true);
+const ultButton = { x: BASE_WIDTH - 70, y: BASE_HEIGHT - 130, r: 35 };
+
+function getCanvasTouchPos(touch) {
+const rect = canvas.getBoundingClientRect();
+return { x: (touch.clientX - rect.left) * (BASE_WIDTH / rect.width), y: (touch.clientY - rect.top) * (BASE_HEIGHT / rect.height) };
+}
+
+function checkWallCollision(x, y, radius, wall) {
+let closestX = Math.max(wall.x, Math.min(x, wall.x + wall.w));
+let closestY = Math.max(wall.y, Math.min(y, wall.y + wall.h));
+return Math.hypot(x - closestX, y - closestY) < radius;
+}
+
+function isCollidingWithAnyWall(x, y, radius) {
+for (const w of walls) { if (checkWallCollision(x, y, radius, w)) return true; }
+return false;
+}
+
+function resolveWallPushOut(char) {
+if (char.isJumping || char.hp <= 0) return;
+walls.forEach(w => {
+let closestX = Math.max(w.x, Math.min(char.x, w.x + w.w));
+let closestY = Math.max(w.y, Math.min(char.y, w.y + w.h));
+let distX = char.x - closestX;
+let distY = char.y - closestY;
+let distance = Math.hypot(distX, distY);
+
+if (distance < char.radius && distance > 0) {
+let overlap = char.radius - distance;
+char.x += (distX / distance) * overlap;
+char.y += (distY / distance) * overlap;
+} else if (distance === 0) {
+let midX = w.x + w.w / 2;
+let midY = w.y + w.h / 2;
+if (Math.abs(char.x - midX) > Math.abs(char.y - midY)) {
+char.x += char.x > midX ? char.radius : -char.radius;
+} else {
+char.y += char.y > midY ? char.radius : -char.radius;
+}
+}
+});
+}
+
+function getRandomSafePosition(radius) {
+let attempts = 0;
+while (attempts < 300) {
+let rx = 120 + Math.random() * (mapWidth - 240);
+let ry = 120 + Math.random() * (mapHeight - 240);
+if (!isCollidingWithAnyWall(rx, ry, radius)) {
+return { x: rx, y: ry };
+}
+attempts++;
+}
+return { x: 200 + Math.random() * 200, y: 200 + Math.random() * 200 };
+}
+
+function spawnCube(x, y) { 
+const newCube = { x: x, y: y, radius: 12 };
+cubes.push(newCube); 
+socket.emit("spawnCube", newCube);
+}
+
+function createQueuedShot(char, angle, bulletData, delayTime) {
+shotQueues.push({
+charId: char.id,
+charRef: char,
+bulletData: bulletData,
+angle: angle,
+timer: delayTime
+});
+}
+
+function fire(char, dx, dy, pullStrength = 1.0) {
+if (char.isJumping || char.isDashing || char.hp <= 0) return;
+if (char.shootCooldown > 0) return;
+if (char.ammo < 1 && !char.ultActive) { char.ultActive = false; return; }
+
+let isUlt = char.ultActive;
+if (isUlt) { char.transparentUltEmit = true; char.ultActive = false; char.ultCharge = 0; } else { char.ammo--; }
+char.healTimer = 0;
+char.shootCooldown = isUlt ? 10 : 30;
+const angle = Math.atan2(dy, dx);
+char.facingAngle = angle;
+const cubeBonus = char.cubes * 100;
+
+// 通信同期用の基礎情報
+const syncBulletBase = {
+ownerId: char.id,
+isUlt: isUlt,
+angle: angle,
+cubeBonus: cubeBonus,
+pullStrength: pullStrength
+};
+
+if (isUlt && char.type.ultType === "JUMP") {
+const maxJumpRange = 250;
+let actualRange = maxJumpRange * pullStrength;
+
+char.isJumping = true;
+char.jumpTarget = { x: char.x + Math.cos(angle) * actualRange, y: char.y + Math.sin(angle) * actualRange };
+char.jumpTarget.x = Math.max(char.radius, Math.min(mapWidth - char.radius, char.jumpTarget.x));
+char.jumpTarget.y = Math.max(char.radius, Math.min(mapHeight - char.radius, char.jumpTarget.y));
+char.jumpStart = { x: char.x, y: char.y };
+char.jumpProgress = 0;
+
+if(char.id === socket.id) socket.emit("fireBullet", { ...syncBulletBase, type: "JUMP" });
+return;
+}
+
+if (char.type.attackType === "DASH" && !isUlt) {
+char.isDashing = true;
+char.dashAngle = angle;
+char.dashDistanceTraveled = 0;
+
+let isLong = (char.type.name === "モーティス" && char.longDashTimer >= 150);
+char.dashMaxDistance = isLong ? 270 : char.type.range;
+char.dashSpeedMultiplier = isLong ? 16 : 10;
+
+if (char.type.name === "モーティス") char.longDashTimer = 0;
+
+const bObj = {
+x: char.x, y: char.y, radius: 24,
+vx: Math.cos(angle) * char.dashSpeedMultiplier,
+vy: Math.sin(angle) * char.dashSpeedMultiplier,
+ownerId: char.id, damage: 2000 + cubeBonus, range: char.dashMaxDistance, traveled: 0, isMortisDash: true, angle: angle,
+targetsHit: []
+};
+bullets.push(bObj);
+
+if(char.id === socket.id) socket.emit("fireBullet", { ...syncBulletBase, type: "DASH", isLong: isLong });
+return;
+}
+
+if (isUlt && char.type.ultType === "BAT_SWARM") {
+bullets.push({
+x: char.x, y: char.y, radius: 26, vx: Math.cos(angle) * 8.5, vy: Math.sin(angle) * 8.5,
+ownerId: char.id, damage: 1800 + cubeBonus, range: 550, traveled: 0, isBat: true, angle: angle,
+isPierceAll: true, targetsHit: []
+});
+if(char.id === socket.id) socket.emit("fireBullet", { ...syncBulletBase, type: "BAT_SWARM" });
+return;
+}
+
+if (char.type.attackType === "PUNCH" && !isUlt) {
+for (let i = 0; i < 3; i++) {
+createQueuedShot(char, angle, {
+radius: 18, speed: 9, damage: 720 + cubeBonus, range: char.type.range, isPunch: true
+}, i * 0.11);
+}
+if(char.id === socket.id) socket.emit("fireBullet", { ...syncBulletBase, type: "PUNCH" });
+} else if (char.type.attackType === "SPREAD" || (isUlt && char.type.ultType === "MEGA_SPREAD")) {
+let count = isUlt ? 10 : 5;
+let spread = isUlt ? 0.6 : char.type.spreadAngle;
+let pRange = char.type.range * (isUlt ? 1.2 : 1);
+for (let i = 0; i < count; i++) {
+let a = angle + (i - (count - 1) / 2) * (spread / count);
+bullets.push({
+x: char.x, y: char.y, radius: isUlt ? 8 : 5, vx: Math.cos(a) * 9, vy: Math.sin(a) * 9,
+ownerId: char.id, damage: (isUlt ? 800 : 600) + (cubeBonus / (isUlt ? 2 : 4)), isUltSpread: isUlt, range: pRange, traveled: 0,
+angle: a
+});
+}
+if(char.id === socket.id) socket.emit("fireBullet", { ...syncBulletBase, type: "SPREAD" });
+} else {
+let shots = isUlt ? 12 : 6;
+let delay = isUlt ? 0.07 : 0.09;
+let speed = isUlt ? 11.5 : 10.5;
+for (let i = 0; i < shots; i++) {
+createQueuedShot(char, angle, {
+radius: isUlt ? 7 : 5, speed: speed, damage: (isUlt ? 900 : 550) + cubeBonus, range: char.type.range * (isUlt ? 1.3 : 1), isUltSpread: isUlt
+}, i * delay);
+}
+if(char.id === socket.id) socket.emit("fireBullet", { ...syncBulletBase, type: "STRAIGHT" });
+}
+}
+
+function fireAutoAim(char) {
+let closestTarget = null; let minDist = Infinity;
+brawlers.forEach(b => {
+if (b !== char && b.hp > 0) {
+let d = Math.hypot(b.x - char.x, b.y - char.y);
+if (d < minDist) { minDist = d; closestTarget = b; }
+}
+});
+sandbags.forEach(bag => {
+let d = Math.hypot(bag.x - char.x, bag.y - char.y);
+if (d < minDist) { minDist = d; closestTarget = bag; }
+});
+if (closestTarget) fire(char, closestTarget.x - char.x, closestTarget.y - char.y, 1.0);
+else fire(char, 1, 0, 1.0);
+}
+
+function getPredictedDirection(bot, target, bulletSpeed) {
+let targetDx = target.x - bot.x;
+let targetDy = target.y - bot.y;
+let distance = Math.hypot(targetDx, targetDy);
+let targetVx = 0; let targetVy = 0;
+if (target.id === socket.id) {
+if (leftStick.active) { targetVx = leftStick.inputX * target.speed; targetVy = leftStick.inputY * target.speed; }
+} else if (target.targetX !== undefined) {
+targetVx = target.targetX * target.speed; targetVy = target.targetY * target.speed;
+}
+let timeToTarget = distance / bulletSpeed;
+return { dx: (target.x + targetVx * timeToTarget * 0.8) - bot.x, dy: (target.y + targetVy * timeToTarget * 0.8) - bot.y };
+}
+
+function addGridWallBlock(startX, startY, countX, countY) {
+for (let i = 0; i < countX; i++) {
+for (let j = 0; j < countY; j++) {
+walls.push({ x: startX + i * WALL_SIZE, y: startY + j * WALL_SIZE, w: WALL_SIZE, h: WALL_SIZE });
+}
+}
+}
+
+function initGame(selectedType) {
+brawlers.length = 0; bullets.length = 0; walls.length = 0;
+sandbags.length = 0; cubes.length = 0; shotQueues.length = 0;
+
+if (gameMode === "DUEL") {
+mapWidth = BASE_WIDTH; mapHeight = BASE_HEIGHT;
+addGridWallBlock(230, 120, 1, 4);
+addGridWallBlock(564, 120, 1, 4);
+addGridWallBlock(360, 210, 2, 1);
+player = {
+id: socket.id, isBot: false, x: 100, y: BASE_HEIGHT / 2, type: selectedType, hp: selectedType.maxHp, maxHp: selectedType.maxHp,
+radius: selectedType.radius, speed: selectedType.speed, ammo: 3, reloadTimer: 0, shootCooldown: 0, ultCharge: 0, ultActive: false,
+isJumping: false, jumpProgress: 0, healTimer: 0, kbVx: 0, kbVy: 0, isDashing: false, dashAngle: 0, dashDistanceTraveled: 0, dashMaxDistance: 0, cubes: 0, longDashTimer: 0, facingAngle: 0
+};
+brawlers.push(player);
+
+sandbags.push({ x: 150, y: 100, hp: 7000, maxHp: 7000, radius: 16 }, { x: 150, y: 380, hp: 7000, maxHp: 7000, radius: 16 });
+} else {
+mapWidth = BASE_WIDTH * 2.5; mapHeight = BASE_HEIGHT * 2.5;
+let gridSpacingX = 240; let gridSpacingY = 200;
+for (let gx = gridSpacingX; gx < mapWidth - gridSpacingX; gx += gridSpacingX) {
+for (let gy = gridSpacingY; gy < mapHeight - gridSpacingY; gy += gridSpacingY) {
+if (Math.random() < 0.45) { walls.push({ x: gx + (Math.random() - 0.5) * 20, y: gy + (Math.random() - 0.5) * 20, w: WALL_SIZE, h: WALL_SIZE }); }
+}
+}
+let pPos = getRandomSafePosition(selectedType.radius);
+player = {
+id: socket.id, isBot: false, x: pPos.x, y: pPos.y, type: selectedType, hp: selectedType.maxHp, maxHp: selectedType.maxHp,
+radius: selectedType.radius, speed: selectedType.speed, ammo: 3, reloadTimer: 0, shootCooldown: 0, ultCharge: 0, ultActive: false,
+isJumping: false, jumpProgress: 0, healTimer: 0, kbVx: 0, kbVy: 0, isDashing: false, dashAngle: 0, dashDistanceTraveled: 0, dashMaxDistance: 0, cubes: 0, longDashTimer: 0, facingAngle: 0
+};
+brawlers.push(player);
+
+for (let i = 0; i < 10; i++) { let sPos = getRandomSafePosition(16); sandbags.push({ x: sPos.x, y: sPos.y, hp: 7000, maxHp: 7000, radius: 16 }); }
+}
+
+// サーバー側に自分が出撃したことを送信
+socket.emit("joinGame", {
+type: selectedType,
+x: player.x,
+y: player.y,
+hp: player.hp,
+maxHp: player.maxHp,
+radius: player.radius,
+speed: player.speed
+});
+
+gameState = "PLAYING"; document.getElementById("menu-screen").style.display = "none";
+}
+
+document.getElementById("btn-duel").addEventListener("click", (e) => { 
+gameMode = "DUEL"; document.getElementById("btn-sd").classList.remove("mode-active"); e.target.classList.add("mode-active"); 
+socket.emit("changeMode", "DUEL");
+});
+document.getElementById("btn-sd").addEventListener("click", (e) => { 
+gameMode = "SHOWDOWN"; document.getElementById("btn-duel").classList.remove("mode-active"); e.target.classList.add("mode-active"); 
+socket.emit("changeMode", "SHOWDOWN");
+});
+document.getElementById("btn-shelly").addEventListener("click", () => initGame(CHAR_TYPES.SHELLY));
+document.getElementById("btn-colt").addEventListener("click", () => initGame(CHAR_TYPES.COLT));
+document.getElementById("btn-elbrown").addEventListener("click", () => initGame(CHAR_TYPES.ELBROWN));
+document.getElementById("btn-mortis").addEventListener("click", () => initGame(CHAR_TYPES.MORTIS));
+
+window.addEventListener("touchstart", (e) => {
+if (gameState === "GAMEOVER") { gameState = "SELECT"; document.getElementById("menu-screen").style.display = "flex"; return; }
+if (gameState !== "PLAYING" || !player || player.hp <= 0) return;
+for (let i = 0; i < e.changedTouches.length; i++) {
+const touch = e.changedTouches[i]; const pos = getCanvasTouchPos(touch);
+if (Math.hypot(pos.x - ultButton.x, pos.y - ultButton.y) < ultButton.r + 15) { if (!ultStick.active) ultStick.start(touch.identifier, ultButton.x, ultButton.y); continue; }
+if (pos.x < BASE_WIDTH / 2 && !leftStick.active) leftStick.start(touch.identifier, pos.x, pos.y);
+else if (pos.x >= BASE_WIDTH / 2 && !rightStick.active) rightStick.start(touch.identifier, pos.x, pos.y);
+}
+});
+
+window.addEventListener("touchmove", (e) => {
+for (let i = 0; i < e.changedTouches.length; i++) {
+const touch = e.changedTouches[i]; const pos = getCanvasTouchPos(touch);
+if (leftStick.active && touch.identifier === leftStick.touchId) leftStick.move(pos.x, pos.y);
+if (rightStick.active && touch.identifier === rightStick.touchId) rightStick.move(pos.x, pos.y);
+if (ultStick.active && touch.identifier === ultStick.touchId) ultStick.move(pos.x, pos.y);
+}
+});
+
+window.addEventListener("touchend", (e) => {
+for (let i = 0; i < e.changedTouches.length; i++) {
+const touch = e.changedTouches[i];
+if (leftStick.active && touch.identifier === leftStick.touchId) leftStick.end();
+if (rightStick.active && touch.identifier === rightStick.touchId) rightStick.end();
+if (ultStick.active && touch.identifier === ultStick.touchId) ultStick.end();
+}
+});
+
+function drawAimIndicator(char, stick) {
+if (!stick.active || !stick.moved || char.isJumping || char.isDashing) return;
+const aimAngle = Math.atan2(stick.inputY, stick.inputX);
+const isJumpUlt = char.transparentUltEmit && char.type.ultType === "JUMP";
+let range = char.type.range * (char.transparentUltEmit ? 1.2 : 1);
+if (char.type.name === "モーティス" && !char.transparentUltEmit) { if (char.longDashTimer >= 150) range = 270; }
+if (isJumpUlt) range = 250 * Math.hypot(stick.inputX, stick.inputY);
+if (char.transparentUltEmit && char.type.ultType === "BAT_SWARM") range = 550;
+const baseColor = char.transparentUltEmit ? "255, 215, 0" : "255, 255, 255";
+
+ctx.save(); ctx.translate(-camera.x, -camera.y);
+if (isJumpUlt) {
+let tx = char.x + Math.cos(aimAngle) * range;
+let ty = char.y + Math.sin(aimAngle) * range;
+ctx.beginPath(); ctx.arc(tx, ty, 65, 0, Math.PI*2);
+ctx.fillStyle = `rgba(${baseColor}, 0.2)`; ctx.fill();
+ctx.strokeStyle = `rgba(${baseColor}, 0.6)`; ctx.lineWidth = 3; ctx.stroke();
+} else if ((char.type.attackType === "STRAIGHT" || char.type.attackType === "DASH" || char.type.ultType === "BAT_SWARM")) {
+ctx.beginPath();
+ctx.moveTo(char.x, char.y); ctx.lineTo(char.x + Math.cos(aimAngle) * range, char.y + Math.sin(aimAngle) * range);
+ctx.strokeStyle = `rgba(${baseColor}, 0.6)`;
+ctx.lineWidth = char.type.ultType === "BAT_SWARM" && char.transparentUltEmit ? 12 : 4;
+ctx.setLineDash([5, 5]); ctx.stroke();
+} else {
+const spread = (char.transparentUltEmit && char.type.ultType === "MEGA_SPREAD") ? 0.6 : char.type.spreadAngle;
+ctx.beginPath(); ctx.moveTo(char.x, char.y); ctx.arc(char.x, char.y, range, aimAngle - spread/2, aimAngle + spread/2); ctx.lineTo(char.x, char.y);
+ctx.fillStyle = `rgba(${baseColor}, 0.2)`; ctx.fill(); ctx.strokeStyle = `rgba(${baseColor}, 0.5)`; ctx.lineWidth = 3; ctx.stroke();
+}
+ctx.restore();
+}
+
+function getReloadMax(name) { if (name === "コルト") return 120; if (name === "エル・プリモ") return 90; if (name === "モーティス") return 130; return 110; }
+
+function drawCharacterDetails(c) {
+ctx.save();
+ctx.translate(c.x, c.y);
+ctx.rotate(c.facingAngle);
+
+const r = c.radius;
+
+if (c.ultActive || c.transparentUltEmit) {
+ctx.beginPath(); ctx.arc(0, 0, r + 5, 0, Math.PI * 2);
+ctx.strokeStyle = "rgba(255, 215, 0, 0.6)"; ctx.lineWidth = 4; ctx.stroke();
+}
+
+if (c.type.name === "シェリー") {
+ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fillStyle = "#8a4af3"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#222"; ctx.stroke();
+ctx.beginPath(); ctx.arc(-r*0.3, 0, r*0.9, Math.PI*0.5, Math.PI*1.5); ctx.fillStyle = "#5c24b3"; ctx.fill();
+ctx.beginPath(); ctx.moveTo(r*0.2, -r*0.5); ctx.lineTo(r*0.6, 0); ctx.lineTo(r*0.2, r*0.5); ctx.fillStyle = "#ffeb3b"; ctx.fill();
+ctx.fillStyle = "#555"; ctx.fillRect(r * 0.3, -4, r * 1.0, 8);
+ctx.fillStyle = "#8b4513"; ctx.fillRect(r * 0.3, -3, r * 0.4, 6);
+}
+else if (c.type.name === "コルト") {
+ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fillStyle = "#2196f3"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#222"; ctx.stroke();
+ctx.beginPath(); ctx.arc(-r*0.2, 0, r*0.8, Math.PI*0.4, Math.PI*1.6); ctx.fillStyle = "#ff2a6d"; ctx.fill();
+ctx.beginPath(); ctx.arc(r*0.2, -r*0.6, r*0.4, 0, Math.PI*2); ctx.fill();
+ctx.beginPath(); ctx.arc(r*0.2, r*0.6, r*0.4, 0, Math.PI*2); ctx.fill();
+ctx.fillStyle = "#bbb";
+ctx.fillRect(r * 0.4, -9, r * 0.7, 4);
+ctx.fillRect(r * 0.4, 5, r * 0.7, 4);
+}
+else if (c.type.name === "エル・プリモ") {
+ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fillStyle = "#e0a96d"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#222"; ctx.stroke();
+ctx.beginPath(); ctx.arc(r*0.1, 0, r*0.9, 0, Math.PI*2); ctx.fillStyle = "#1a237e"; ctx.fill();
+ctx.fillStyle = "#ffeb3b";
+ctx.beginPath(); ctx.arc(r*0.4, -r*0.3, 4, 0, Math.PI*2); ctx.fill();
+ctx.beginPath(); ctx.arc(r*0.4, r*0.3, 4, 0, Math.PI*2); ctx.fill();
+ctx.fillStyle = "#000";
+ctx.beginPath(); ctx.arc(r*0.45, -r*0.3, 1.5, 0, Math.PI*2); ctx.fill();
+ctx.beginPath(); ctx.arc(r*0.45, r*0.3, 1.5, 0, Math.PI*2); ctx.fill();
+ctx.fillStyle = "#ffd700"; ctx.fillRect(-r*0.6, -r*0.3, 5, r*0.6);
+ctx.fillStyle = "#d50000"; ctx.fillRect(-r*0.6, -2, 5, 4);
+}
+else if (c.type.name === "モーティス") {
+ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fillStyle = "#37474f"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#111"; ctx.stroke();
+ctx.beginPath(); ctx.arc(r*0.1, 0, r*0.7, 0, Math.PI*2); ctx.fillStyle = "#e0f2f1"; ctx.fill();
+ctx.fillStyle = "#212121";
+ctx.fillRect(-r*0.6, -r*0.8, r*1.1, r*1.6);
+ctx.fillRect(-r*0.4, -r*0.5, r*0.8, r*1.0);
+ctx.fillStyle = "#cc1111"; ctx.fillRect(-r*0.4, -r*0.5, 2, r*1.0);
+ctx.strokeStyle = "#8d6e63"; ctx.lineWidth = 3;
+ctx.beginPath(); ctx.moveTo(r*0.2, r*0.5); ctx.lineTo(r*1.1, r*0.9); ctx.stroke();
+ctx.fillStyle = "#9e9e9e"; ctx.beginPath(); ctx.arc(r*1.1, r*0.9, 6, 0, Math.PI*2); ctx.fill();
+}
+
+ctx.restore();
+}
+
+let lastTime = 0;
+
+function gameLoop(timestamp) {
+if (!lastTime) lastTime = timestamp;
+let dt = (timestamp - lastTime) / 1000;
+if (dt > 0.1) dt = 0.1;
+lastTime = timestamp;
+
+const deltaRatio = dt * 60;
+
+ctx.clearRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
+if (gameState === "PLAYING") {
+if (gameMode === "SHOWDOWN") {
+if(player) {
+camera.x = player.x - BASE_WIDTH / 2;
+camera.y = player.y - BASE_HEIGHT / 2;
+}
+camera.x = Math.max(0, Math.min(mapWidth - BASE_WIDTH, camera.x));
+camera.y = Math.max(0, Math.min(mapHeight - BASE_HEIGHT, camera.y));
+} else { camera.x = 0; camera.y = 0; }
+
+for (let i = shotQueues.length - 1; i >= 0; i--) {
+let sq = shotQueues[i];
+sq.timer -= dt;
+if (sq.timer <= 0) {
+if (sq.charRef && sq.charRef.hp > 0) {
+bullets.push({
+x: sq.charRef.x, y: sq.charRef.y, radius: sq.bulletData.radius,
+vx: Math.cos(sq.angle) * sq.bulletData.speed, vy: Math.sin(sq.angle) * sq.bulletData.speed,
+ownerId: sq.charRef.id, damage: sq.bulletData.damage, range: sq.bulletData.range, traveled: 0,
+isPunch: sq.bulletData.isPunch || false, isUltSpread: sq.bulletData.isUltSpread || false,
+angle: sq.angle, targetsHit: []
+});
+}
+shotQueues.splice(i, 1);
+}
+}
+
+brawlers.forEach(c => {
+if (c.hp <= 0) return;
+if (c.shootCooldown > 0) c.shootCooldown -= deltaRatio;
+let reloadMax = getReloadMax(c.type.name);
+if (c.ammo < 3) { c.reloadTimer += deltaRatio; if (c.reloadTimer >= reloadMax) { c.ammo++; c.reloadTimer = 0; } }
+
+if (c.type.name === "モーティス") {
+if (!c.isDashing) {
+if (c.longDashTimer < 150) c.longDashTimer += deltaRatio;
+}
+}
+c.healTimer += deltaRatio; if (c.healTimer >= 150 && c.hp < c.maxHp) c.hp = Math.min(c.maxHp, Math.floor(c.hp + c.maxHp * 0.005 * deltaRatio));
+});
+
+brawlers.forEach(c => {
+if (c.hp <= 0) return;
+if (Math.abs(c.kbVx) > 0.1 || Math.abs(c.kbVy) > 0.1) {
+c.x += c.kbVx * deltaRatio; c.y += c.kbVy * deltaRatio;
+c.kbVx *= Math.pow(0.85, deltaRatio); c.kbVy *= Math.pow(0.85, deltaRatio);
+}
+});
+
+brawlers.forEach(c => {
+if (c.hp <= 0) return;
+if (c.isJumping) {
+c.jumpProgress += 0.03 * deltaRatio; const t = c.jumpProgress;
+c.x = c.jumpStart.x + (c.jumpTarget.x - c.jumpStart.x) * Math.min(1, t); c.y = c.jumpStart.y + (c.jumpTarget.y - c.jumpStart.y) * Math.min(1, t);
+c.jumpHeight = Math.sin(Math.min(1, t) * Math.PI) * 35;
+if (t >= 1) {
+c.isJumping = false; c.x = c.jumpTarget.x; c.y = c.jumpTarget.y; c.jumpHeight = 0;
+let dmg = 2200 + (c.cubes * 150);
+
+for (let wIdx = walls.length - 1; wIdx >= 0; wIdx--) {
+if (checkWallCollision(c.x, c.y, 75, walls[wIdx])) { 
+walls.splice(wIdx, 1); 
+if(c.id === socket.id) socket.emit("destroyWall", wIdx);
+}
+}
+
+brawlers.forEach(other => {
+if (other !== c && other.hp > 0 && Math.hypot(other.x - c.x, other.y - c.y) < 75) {
+other.hp -= dmg; other.healTimer = 0;
+other.kbVx = Math.sign(other.x - c.x) * 6; other.kbVy = Math.sign(other.y - c.y) * 6;
+c.transparentUltEmit = false;
+c.ultCharge = Math.min(100, c.ultCharge + 25);
+if (other.hp <= 0) { other.hp = 0; spawnCube(other.x, other.y); }
+}
+});
+for (let sIdx = sandbags.length - 1; sIdx >= 0; sIdx--) {
+let bag = sandbags[sIdx];
+if (Math.hypot(bag.x - c.x, bag.y - c.y) < 75) {
+bag.hp -= dmg; c.ultCharge = Math.min(100, c.ultCharge + 25);
+if (bag.hp <= 0) { sandbags.splice(sIdx, 1); spawnCube(bag.x, bag.y); }
+socket.emit("updateSandbag", {idx: sIdx, hp: bag.hp});
+}
+}
+}
+} else if (c.isDashing) {
+let spd = c.dashSpeedMultiplier || 10;
+let moveStep = spd * deltaRatio;
+
+let steps = Math.ceil(moveStep / 2);
+let stepSize = moveStep / steps;
+let hitWall = false;
+
+for (let s = 0; s < steps; s++) {
+let nextX = c.x + Math.cos(c.dashAngle) * stepSize;
+let nextY = c.y + Math.sin(c.dashAngle) * stepSize;
+
+if (isCollidingWithAnyWall(nextX, nextY, c.radius)) {
+hitWall = true;
+break; 
+}
+c.x = nextX;
+c.y = nextY;
+c.dashDistanceTraveled += stepSize;
+}
+
+if (hitWall || c.dashDistanceTraveled >= c.dashMaxDistance) {
+c.isDashing = false;
+}
+} else if (c.id === socket.id) {
+let mx = leftStick.inputX; let my = leftStick.inputY;
+if (Math.hypot(mx, my) > 1) { mx /= Math.hypot(mx, my); my /= Math.hypot(mx, my); }
+player.x += mx * player.speed * deltaRatio;
+player.y += my * player.speed * deltaRatio;
+if (Math.hypot(mx, my) > 0.15) {
+player.facingAngle = Math.atan2(my, mx);
+}
+}
+
+resolveWallPushOut(c);
+c.x = Math.max(c.radius, Math.min(mapWidth - c.radius, c.x)); c.y = Math.max(c.radius, Math.min(mapHeight - c.radius, c.y));
+});
+
+// 自分のステータス変更をサーバーに同期
+if(player && player.hp > 0) {
+socket.emit("updateStatus", {
+x: player.x,
+y: player.y,
+hp: player.hp,
+maxHp: player.maxHp,
+facingAngle: player.facingAngle,
+ammo: player.ammo,
+ultCharge: player.ultCharge,
+longDashTimer: player.longDashTimer,
+cubes: player.cubes
+});
+}
+
+brawlers.forEach(botIdx => {
+if (!botIdx.isBot || botIdx.hp <= 0 || botIdx.isJumping || botIdx.isDashing) return;
+botIdx.aiTimer -= deltaRatio;
+
+let isLowHp = botIdx.hp / botIdx.maxHp < 0.40;
+
+if (botIdx.aiTimer <= 0) {
+let targetBrawler = null; let minBDist = Infinity;
+brawlers.forEach(b => { if (b !== botIdx && b.hp > 0) { let d = Math.hypot(b.x - botIdx.x, b.y - botIdx.y); if (d < minBDist) { minBDist = d; targetBrawler = b; } } });
+
+if (isLowHp && targetBrawler) {
+let escapeAng = Math.atan2(botIdx.y - targetBrawler.y, botIdx.x - targetBrawler.x);
+
+let bestWall = null; let minWDist = Infinity;
+walls.forEach(w => {
+let wMidX = w.x + 30; let wMidY = w.y + 30;
+let d = Math.hypot(wMidX - botIdx.x, wMidY - botIdx.y);
+if (d < minWDist && d < 250) { minWDist = d; bestWall = w; }
+});
+
+if (bestWall) {
+let wallAng = Math.atan2((bestWall.y+30) - botIdx.y, (bestWall.x+30) - botIdx.x);
+botIdx.targetX = Math.cos(wallAng) * 0.4 + Math.cos(escapeAng) * 0.6;
+botIdx.targetY = Math.sin(wallAng) * 0.4 + Math.sin(escapeAng) * 0.6;
+} else {
+botIdx.targetX = Math.cos(escapeAng); botIdx.targetY = Math.sin(escapeAng);
+}
+
+if (botIdx.ammo > 0 && botIdx.shootCooldown <= 0 && minBDist < 100) {
+let pred = getPredictedDirection(botIdx, targetBrawler, 10); fire(botIdx, pred.dx, pred.dy, 1.0);
+}
+} else {
+let closestCube = null; let minCubeDist = Infinity;
+cubes.forEach(cube => { let d = Math.hypot(cube.x - botIdx.x, cube.y - botIdx.y); if (d < minCubeDist) { minCubeDist = d; closestCube = cube; } });
+
+if (closestCube && minCubeDist < 250) {
+let ang = Math.atan2(closestCube.y - botIdx.y, closestCube.x - botIdx.x);
+botIdx.targetX = Math.cos(ang); botIdx.targetY = Math.sin(ang);
+}
+else if (targetBrawler) {
+let bAng = Math.atan2(targetBrawler.y - botIdx.y, targetBrawler.x - botIdx.x);
+
+let idealDist = 170;
+if (botIdx.type.attackType === "PUNCH" || botIdx.type.attackType === "DASH") idealDist = 35;
+if (botIdx.type.attackType === "STRAIGHT") idealDist = 250;
+
+if (minBDist > idealDist + 20) {
+botIdx.targetX = Math.cos(bAng); botIdx.targetY = Math.sin(bAng);
+} else if (minBDist < idealDist - 20) {
+botIdx.targetX = -Math.cos(bAng); botIdx.targetY = -Math.sin(bAng);
+} else {
+botIdx.targetX = -Math.sin(bAng); botIdx.targetY = Math.cos(bAng);
+}
+
+let isReadyToShoot = (botIdx.ammo === 3) || (minBDist < botIdx.type.range + 20 && botIdx.ammo >= 1);
+if (botIdx.type.attackType === "PUNCH" && minBDist > 120) isReadyToShoot = false;
+
+if (isReadyToShoot && botIdx.shootCooldown <= 0) {
+if (botIdx.transparentUltEmit) {
+botIdx.ultActive = true;
+if (botIdx.type.ultType === "JUMP") {
+fire(botIdx, targetBrawler.x - botIdx.x, targetBrawler.y - botIdx.y, Math.min(1.0, minBDist / 250));
+botIdx.aiTimer = 15; return;
+}
+}
+let pred = getPredictedDirection(botIdx, targetBrawler, botIdx.transparentUltEmit && botIdx.type.ultType === "BAT_SWARM" ? 8.5 : 10);
+fire(botIdx, pred.dx, pred.dy, 1.0);
+}
+} else {
+let closestBag = null; let minBagDist = Infinity;
+sandbags.forEach(bag => { let d = Math.hypot(bag.x - botIdx.x, bag.y - botIdx.y); if (d < minBagDist) { minBagDist = d; closestBag = bag; } });
+if (closestBag) {
+let ang = Math.atan2(closestBag.y - botIdx.y, closestBag.x - botIdx.x); botIdx.targetX = Math.cos(ang); botIdx.targetY = Math.sin(ang);
+if (minBagDist < botIdx.type.range + 30 && botIdx.ammo > 0 && botIdx.shootCooldown <= 0) {
+fire(botIdx, closestBag.x - botIdx.x, closestBag.y - botIdx.y, 1.0);
+}
+}
+}
+}
+botIdx.aiTimer = 5 + Math.random() * 5;
+}
+botIdx.x += botIdx.targetX * botIdx.speed * deltaRatio;
+botIdx.y += botIdx.targetY * botIdx.speed * deltaRatio;
+if (Math.hypot(botIdx.targetX, botIdx.targetY) > 0.1) {
+botIdx.facingAngle = Math.atan2(botIdx.targetY, botIdx.targetX);
+}
+});
+
+for (let i = cubes.length - 1; i >= 0; i--) {
+let cube = cubes[i];
+brawlers.forEach(c => { if (c.hp > 0 && Math.hypot(c.x - cube.x, c.y - cube.y) < c.radius + cube.radius) { c.cubes++; c.maxHp += 400; c.hp += 400; cubes.splice(i, 1); } });
+}
+
+for (let i = bullets.length - 1; i >= 0; i--) {
+const b = bullets[i];
+let stepX = b.vx * deltaRatio; let stepY = b.vy * deltaRatio;
+b.x += stepX; b.y += stepY; b.traveled += Math.hypot(stepX, stepY);
+let hitWall = false;
+if (!b.isMortisDash && !b.isBat && !b.isPierceAll) {
+for (let wIdx = walls.length - 1; wIdx >= 0; wIdx--) {
+const wall = walls[wIdx];
+if (b.x > wall.x && b.x < wall.x + wall.w && b.y > wall.y && b.y < wall.y + wall.h) {
+let ownerBrawler = brawlers.find(br => br.id === b.ownerId);
+if (b.isUltSpread && ownerBrawler && ownerBrawler.type && (ownerBrawler.type.name === "コルト" || ownerBrawler.type.name === "シェリー")) {
+walls.splice(wIdx, 1);
+if(b.ownerId === socket.id) socket.emit("destroyWall", wIdx);
+} else {
+if (!b.isPunch) hitWall = true;
+break;
+}
+}
+}
+}
+if (hitWall || b.traveled > b.range || b.x < 0 || b.x > mapWidth || b.y < 0 || b.y > mapHeight) { bullets.splice(i, 1); continue; }
+
+let hitRegistered = false;
+brawlers.forEach(target => {
+if (target.id !== b.ownerId && target.hp > 0 && !target.isJumping) {
+if (Math.hypot(target.x - b.x, target.y - b.y) < target.radius + b.radius) {
+if (b.targetsHit && b.targetsHit.includes(target.id)) return;
+if (b.targetsHit) b.targetsHit.push(target.id);
+
+target.hp -= b.damage; target.healTimer = 0;
+if (b.isUltSpread && b.angle !== undefined) { target.kbVx = Math.cos(b.angle) * 8; target.kbVy = Math.sin(b.angle) * 8; }
+let chargeAmt = b.isPunch ? 14 : (b.isUltSpread ? 4 : 15); if (b.isMortisDash) chargeAmt = 34;
+
+let ownerBrawler = brawlers.find(br => br.id === b.ownerId);
+if (!b.isBat && ownerBrawler) {
+ownerBrawler.ultCharge = Math.min(100, (ownerBrawler.ultCharge || 0) + chargeAmt);
+if (ownerBrawler.ultCharge >= 100) ownerBrawler.transparentUltEmit = true;
+}
+if (b.isBat && ownerBrawler) ownerBrawler.hp = Math.min(ownerBrawler.maxHp, ownerBrawler.hp + (b.damage * 0.8));
+
+if (!b.isPierceAll && !b.isMortisDash && !b.isPunch) hitRegistered = true;
+if (target.hp <= 0) { target.hp = 0; spawnCube(target.x, target.y); }
+}
+}
+});
+if (!hitRegistered || b.isPierceAll || b.isPunch) {
+for (let sIdx = sandbags.length - 1; sIdx >= 0; sIdx--) {
+let bag = sandbags[sIdx];
+if (Math.hypot(bag.x - b.x, bag.y - b.y) < bag.radius + b.radius) {
+let bagId = `bag_${bag.x}_${bag.y}`;
+if (b.targetsHit && b.targetsHit.includes(bagId)) continue;
+if (b.targetsHit) b.targetsHit.push(bagId);
+
+bag.hp -= b.damage;
+let chargeAmt = b.isPunch ? 14 : (b.isUltSpread ? 4 : 15); if (b.isMortisDash) chargeAmt = 34;
+let ownerBrawler = brawlers.find(br => br.id === b.ownerId);
+if (!b.isBat && ownerBrawler) {
+ownerBrawler.ultCharge = Math.min(100, (ownerBrawler.ultCharge || 0) + chargeAmt);
+if (ownerBrawler.ultCharge >= 100) ownerBrawler.transparentUltEmit = true;
+}
+if (b.isBat && ownerBrawler) ownerBrawler.hp = Math.min(ownerBrawler.maxHp, ownerBrawler.hp + (b.damage * 0.8));
+
+if (bag.hp <= 0) { sandbags.splice(sIdx, 1); spawnCube(bag.x, bag.y); }
+if (b.ownerId === socket.id) socket.emit("updateSandbag", {idx: sIdx, hp: bag.hp});
+
+if (!b.isPierceAll && !b.isMortisDash && !b.isPunch) { hitRegistered = true; break; }
+}
+}
+}
+if (hitRegistered) bullets.splice(i, 1);
+}
+
+let aliveCount = brawlers.filter(b => b.hp > 0).length;
+if (player && player.hp <= 0 && gameState === "PLAYING") { 
+gameState = "GAMEOVER"; winner = "BOT"; 
+socket.emit("triggerGameOver", { winner: "BOT", id: socket.id });
+}
+else if (aliveCount === 1 && player && player.hp > 0 && gameState === "PLAYING" && gameMode === "DUEL") { 
+gameState = "GAMEOVER"; winner = "PLAYER"; 
+socket.emit("triggerGameOver", { winner: "PLAYER", id: socket.id });
+}
+
+ctx.save(); ctx.translate(-camera.x, -camera.y);
+if (gameMode === "SHOWDOWN") {
+ctx.strokeStyle = "rgba(0,0,0,0.06)"; ctx.lineWidth = 2;
+for(let x=0; x<mapWidth; x+=80){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,mapHeight); ctx.stroke(); }
+for(let y=0; y<mapHeight; y+=80){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(mapWidth,y); ctx.stroke(); }
+}
+
+walls.forEach(w => { ctx.fillStyle = "#a0522d"; ctx.fillRect(w.x, w.y, w.w, w.h); ctx.strokeStyle = "#8b4513"; ctx.lineWidth = 2; ctx.strokeRect(w.x, w.y, w.w, w.h); });
+sandbags.forEach(bag => {
+ctx.beginPath(); ctx.arc(bag.x, bag.y, bag.radius, 0, Math.PI*2); ctx.fillStyle = "#9e9e9e"; ctx.fill(); ctx.strokeStyle = "#333"; ctx.lineWidth = 3; ctx.stroke();
+ctx.beginPath(); ctx.arc(bag.x, bag.y, bag.radius * 0.5, 0, Math.PI*2); ctx.fillStyle = "#e53935"; ctx.fill();
+const bBarW = 40; ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(bag.x - bBarW/2, bag.y - bag.radius - 12, bBarW, 5);
+ctx.fillStyle = "#ffeb3b"; ctx.fillRect(bag.x - bBarW/2, bag.y - bag.radius - 12, bBarW * (bag.hp / bag.maxHp), 5);
+});
+cubes.forEach(cube => {
+ctx.beginPath(); ctx.arc(cube.x, cube.y, cube.radius, 0, Math.PI*2); ctx.fillStyle = "#4caf50"; ctx.fill(); ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
+ctx.fillStyle = "#fff"; ctx.font = "10px sans-serif"; ctx.fillText("⚡", cube.x, cube.y + 3);
+});
+bullets.forEach(b => {
+if (b.isMortisDash) return; ctx.beginPath();
+if (b.isBat) { ctx.arc(b.x, b.y, b.radius, 0, Math.PI*2); ctx.fillStyle = "rgba(138, 43, 226, 0.85)"; }
+else { ctx.arc(b.x, b.y, b.radius, 0, Math.PI*2); ctx.fillStyle = b.isPunch ? "rgba(255,160,50,0.7)" : (b.ownerId === socket.id ? "#fff" : "#ff4444"); }
+ctx.fill();
+});
+
+brawlers.forEach(c => {
+if (c.hp <= 0) return;
+
+ctx.save();
+if (c.isJumping) {
+ctx.beginPath(); ctx.ellipse(c.x, c.y + c.radius/2, c.radius * 1.5, c.radius * 0.8, 0, 0, Math.PI*2); ctx.fillStyle = "rgba(0,0,0,0.3)"; ctx.fill();
+ctx.translate(0, -c.jumpHeight);
+}
+drawCharacterDetails(c);
+ctx.restore();
+
+const barW = 60; const uiY = c.y - c.radius - (c.isJumping ? c.jumpHeight : 0);
+
+ctx.fillStyle = c.id === socket.id ? "#ffeb3b" : "#ff4444";
+ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
+ctx.fillText(c.type.name + (c.id === socket.id ? " (自分)" : ""), c.x, uiY - 36);
+
+ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(c.x - barW/2, uiY - 32, barW, 9);
+ctx.fillStyle = c.id === socket.id ? "#22cc22" : "#ff2222"; ctx.fillRect(c.x - barW/2, uiY - 32, barW * (c.hp / c.maxHp), 9);
+ctx.fillStyle = "#ffffff"; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "center"; ctx.fillText((c.cubes > 0 ? "⚡" + c.cubes + " | " : "") + c.hp, c.x, uiY - 24);
+
+for (let i = 0; i < 3; i++) { ctx.fillStyle = i < c.ammo ? "#ff9800" : "rgba(0,0,0,0.5)"; ctx.fillRect(c.x - barW/2 + i * 21, uiY - 19, 18, 3); }
+
+ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(c.x - barW/2, uiY - 14, barW, 3);
+let reloadMax = getReloadMax(c.type.name); ctx.fillStyle = c.ammo < 3 ? "#ffeb3b" : "#ff9800"; ctx.fillRect(c.x - barW/2, uiY - 14, barW * (c.ammo < 3 ? (c.reloadTimer / reloadMax) : 1), 3);
+
+if (c.type.name === "モーティス") {
+ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(c.x - barW/2, uiY - 10, barW, 3);
+ctx.fillStyle = c.longDashTimer >= 150 ? "#00ffcc" : "#e066ff"; ctx.fillRect(c.x - barW/2, uiY - 10, barW * (c.longDashTimer / 150), 3);
+}
+
+ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(c.x - barW/2, uiY - 6, barW, 3);
+ctx.fillStyle = c.ultCharge >= 100 ? "#ffd700" : "#2196f3"; ctx.fillRect(c.x - barW/2, uiY - 6, barW * (c.ultCharge / 100), 3);
+});
+
+ctx.restore();
+if (player && player.hp > 0) {
+drawAimIndicator(player, rightStick); drawAimIndicator(player, ultStick);
+leftStick.draw(); rightStick.draw();
+ctx.beginPath(); ctx.arc(ultButton.x, ultButton.y, ultButton.r, 0, Math.PI * 2);
+ctx.fillStyle = player.ultCharge >= 100 ? "#ffd700" : "#444";
+ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.fill(); ctx.stroke();
+ctx.fillStyle = "#000"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+ctx.fillText(player.type.ultType === "JUMP" ? "ジャンプ" : (player.type.ultType === "BAT_SWARM" ? "コウモリ" : "ウルト"), ultButton.x, ultButton.y + 5);
+if (ultStick.active) { ctx.beginPath(); ctx.arc(ultStick.currentX, ultStick.currentY, 15, 0, Math.PI*2); ctx.fillStyle="rgba(255,255,255,0.7)"; ctx.fill(); }
+}
+
+if (gameMode === "SHOWDOWN") {
+ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(15, 15, 140, 35);
+ctx.fillStyle = "#ffeb3b"; ctx.font = "bold 16px sans-serif"; ctx.textAlign = "left";
+ctx.fillText(`生存人数: ${aliveCount}`, 25, 38);
+}
+} else if (gameState === "GAMEOVER") {
+ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.fillRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
+ctx.fillStyle = winner === "PLAYER" ? "#4caf50" : "#f44336"; ctx.font = "bold 46px sans-serif"; ctx.textAlign = "center";
+let endTxt = winner === "PLAYER" ? "VICTORY!" : "DEFEAT";
+if (gameMode === "SHOWDOWN") {
+let rank = brawlers.filter(b => b.hp > 0).length + 1;
+if (winner === "PLAYER") rank = 1;
+endTxt = rank === 1 ? "🏆 1位 (VICTORY!)" : `終局 (順位: ${rank}位)`;
+}
+ctx.fillText(endTxt, BASE_WIDTH / 2, BASE_HEIGHT / 2);
+ctx.fillStyle = "#fff"; ctx.font = "20px sans-serif"; ctx.fillText("タッチしてメニューへ戻る", BASE_WIDTH / 2, BASE_HEIGHT / 2 + 50);
+}
+requestAnimationFrame(gameLoop);
+}
+
+// --- NETWORK SYNC (Socket.io受信イベント定義) ---
+
+socket.on("initGameState", (data) => {
+gameMode = data.gameMode;
+gameState = data.gameState;
+if(gameState === "PLAYING") {
+document.getElementById("menu-screen").style.display = "none";
+}
+});
+
+socket.on("modeChanged", (mode) => {
+gameMode = mode;
+const btnDuel = document.getElementById("btn-duel");
+const btnSd = document.getElementById("btn-sd");
+if(mode === "DUEL") {
+btnSd.classList.remove("mode-active"); btnDuel.classList.add("mode-active");
+} else {
+btnDuel.classList.remove("mode-active"); btnSd.classList.add("mode-active");
+}
+});
+
+socket.on("playerJoined", (remotePlayer) => {
+let exist = brawlers.find(b => b.id === remotePlayer.id);
+if(!exist) {
+brawlers.push({
+id: remotePlayer.id,
+isBot: false,
+x: remotePlayer.x,
+y: remotePlayer.y,
+type: remotePlayer.type,
+hp: remotePlayer.hp,
+maxHp: remotePlayer.maxHp,
+radius: remotePlayer.radius,
+speed: remotePlayer.speed,
+ammo: 3, reloadTimer: 0, shootCooldown: 0, ultCharge: 0, ultActive: false,
+isJumping: false, jumpProgress: 0, healTimer: 0, kbVx: 0, kbVy: 0,
+isDashing: false, dashAngle: 0, dashDistanceTraveled: 0, dashMaxDistance: 0, cubes: 0, longDashTimer: 0, facingAngle: remotePlayer.facingAngle
+});
+}
+});
+
+socket.on("remotePlayerUpdated", (data) => {
+let target = brawlers.find(b => b.id === data.id);
+if(target && data.id !== socket.id) {
+target.x = data.x;
+target.y = data.y;
+target.hp = data.hp;
+target.maxHp = data.maxHp;
+target.facingAngle = data.facingAngle;
+target.ammo = data.ammo;
+target.ultCharge = data.ultCharge;
+target.longDashTimer = data.longDashTimer;
+target.cubes = data.cubes;
+}
+});
+
+socket.on("remoteBulletFired", (data) => {
+if(data.ownerId === socket.id) return; // 自分の弾は生成済みのためスルー
+let launcher = brawlers.find(b => b.id === data.ownerId);
+if(!launcher) return;
+
+launcher.ultActive = data.isUlt;
+launcher.facingAngle = data.angle;
+
+if (data.type === "JUMP") {
+launcher.isJumping = true;
+launcher.jumpTarget = { x: launcher.x + Math.cos(data.angle) * (250 * data.pullStrength), y: launcher.y + Math.sin(data.angle) * (250 * data.pullStrength) };
+launcher.jumpStart = { x: launcher.x, y: launcher.y };
+launcher.jumpProgress = 0;
+return;
+}
+if (data.type === "DASH") {
+launcher.isDashing = true;
+launcher.dashAngle = data.angle;
+launcher.dashDistanceTraveled = 0;
+launcher.dashMaxDistance = data.isLong ? 270 : launcher.type.range;
+launcher.dashSpeedMultiplier = data.isLong ? 16 : 10;
+bullets.push({
+x: launcher.x, y: launcher.y, radius: 24,
+vx: Math.cos(data.angle) * launcher.dashSpeedMultiplier,
+vy: Math.sin(data.angle) * launcher.dashSpeedMultiplier,
+ownerId: launcher.id, damage: 2000 + data.cubeBonus, range: launcher.dashMaxDistance, traveled: 0, isMortisDash: true, angle: data.angle,
+targetsHit: []
+});
+return;
+}
+if (data.type === "BAT_SWARM") {
+bullets.push({
+x: launcher.x, y: launcher.y, radius: 26, vx: Math.cos(data.angle) * 8.5, vy: Math.sin(data.angle) * 8.5,
+ownerId: launcher.id, damage: 1800 + data.cubeBonus, range: 550, traveled: 0, isBat: true, angle: data.angle,
+isPierceAll: true, targetsHit: []
+});
+return;
+}
+if (data.type === "PUNCH") {
+for (let i = 0; i < 3; i++) {
+createQueuedShot(launcher, data.angle, { radius: 18, speed: 9, damage: 720 + data.cubeBonus, range: launcher.type.range, isPunch: true }, i * 0.11);
+}
+} else if (data.type === "SPREAD") {
+let count = data.isUlt ? 10 : 5;
+let spread = data.isUlt ? 0.6 : launcher.type.spreadAngle;
+let pRange = launcher.type.range * (data.isUlt ? 1.2 : 1);
+for (let i = 0; i < count; i++) {
+let a = data.angle + (i - (count - 1) / 2) * (spread / count);
+bullets.push({
+x: launcher.x, y: launcher.y, radius: data.isUlt ? 8 : 5, vx: Math.cos(a) * 9, vy: Math.sin(a) * 9,
+ownerId: launcher.id, damage: (data.isUlt ? 800 : 600) + (data.cubeBonus / (data.isUlt ? 2 : 4)), isUltSpread: data.isUlt, range: pRange, traveled: 0, angle: a
+});
+}
+} else {
+let shots = data.isUlt ? 12 : 6;
+let delay = data.isUlt ? 0.07 : 0.09;
+let speed = data.isUlt ? 11.5 : 10.5;
+for (let i = 0; i < shots; i++) {
+createQueuedShot(launcher, data.angle, { radius: data.isUlt ? 7 : 5, speed: speed, damage: (data.isUlt ? 900 : 550) + data.cubeBonus, range: launcher.type.range * (data.isUlt ? 1.3 : 1), isUltSpread: data.isUlt }, i * delay);
+}
+}
+});
+
+socket.on("remoteCubeSpawned", (cubeData) => {
+let exist = cubes.find(c => c.x === cubeData.x && c.y === cubeData.y);
+if(!exist) cubes.push(cubeData);
+});
+
+socket.on("remoteSandbagUpdated", (bagData) => {
+if(sandbags[bagData.idx]) {
+sandbags[bagData.idx].hp = bagData.hp;
+if(bagData.hp <= 0) sandbags.splice(bagData.idx, 1);
+}
+});
+
+socket.on("remoteWallDestroyed", (wallIdx) => {
+if(walls[wallIdx]) walls.splice(wallIdx, 1);
+});
+
+socket.on("remoteGameOver", (data) => {
+gameState = "GAMEOVER";
+winner = (data.id === socket.id) ? (data.winner === "PLAYER" ? "PLAYER" : "BOT") : (data.winner === "PLAYER" ? "BOT" : "PLAYER");
+});
+
+socket.on("playerLeft", (id) => {
+brawlers = brawlers.filter(b => b.id !== id);
+});
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
