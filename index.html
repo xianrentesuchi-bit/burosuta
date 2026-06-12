@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>ブロスタ風バトロワ（オンラインマルチ対戦版）</title>
+<title>ブロスタ風バトロワ（合言葉マッチング対応版）</title>
 <style>
 * {
 box-sizing: border-box;
@@ -45,6 +45,24 @@ transition: transform 0.1s;
 #btn-elbrown { background: #ff9800; }
 #btn-mortis { background: #4e342e; }
 h3 { margin-bottom: 5px; color: #ccc; }
+
+/* 合言葉入力画面用のスタイル */
+#room-overlay {
+position: absolute; width: 100%; height: 100%; background: #151515;
+display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 200;
+}
+.input-field {
+padding: 12px; font-size: 18px; width: 220px; text-align: center; border-radius: 8px;
+border: 2px solid #555; background: #222; color: #fff; margin-bottom: 15px; text-transform: uppercase;
+}
+.submit-btn {
+padding: 12px 30px; font-size: 16px; font-weight: bold; background: #009688; border: none;
+border-radius: 8px; color: white; cursor: pointer;
+}
+#room-display {
+position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.5); padding: 5px 10px;
+border-radius: 5px; font-size: 12px; font-weight: bold; color: #ffd700; pointer-events: none;
+}
 </style>
 <script src="/socket.io/socket.io.js"></script>
 </head>
@@ -52,8 +70,17 @@ h3 { margin-bottom: 5px; color: #ccc; }
 
 <div id="orientation-alert">🔄 画面を横向きに回転させてください</div>
 
-<div id="menu-screen">
+<!-- 合言葉入力画面（一番最初に表示される） -->
+<div id="room-overlay">
+<h2 style="margin-bottom: 20px;">合言葉を入力して入室</h2>
+<!-- デフォルト値として「BRAWL」を入力済みにしています -->
+<input type="text" id="room-input" class="input-field" placeholder="例: ROOM123" value="BRAWL" maxlength="12">
+<button id="btn-join-room" class="submit-btn">決定・入室</button>
+</div>
+
+<div id="menu-screen" style="display: none;">
 <h2>ブロスタ・オンラインマルチ対戦メニュー</h2>
+<div id="room-display">ルーム: <span id="current-room-text">-</span></div>
 
 <h3>1. モードを選択</h3>
 <div class="btn-container">
@@ -73,8 +100,29 @@ h3 { margin-bottom: 5px; color: #ccc; }
 <canvas id="gameCanvas"></canvas>
 
 <script>
-// Socket.ioの初期化接続
 const socket = io();
+
+// 合言葉決定ボタンの処理
+document.getElementById("btn-join-room").addEventListener("click", () => {
+const inputElement = document.getElementById("room-input");
+const roomCode = inputElement.value.trim();
+if (roomCode === "") {
+alert("合言葉を入力してください");
+return;
+}
+// サーバーへ部屋の所属要求を送信
+socket.emit("joinRoom", roomCode);
+document.getElementById("current-room-text").innerText = roomCode.toUpperCase();
+document.getElementById("room-overlay").style.display = "none";
+document.getElementById("menu-screen").style.display = "flex";
+});
+
+// スマホのキーボード操作などへの対応（Enterキーでも入室可能に）
+document.getElementById("room-input").addEventListener("keypress", (e) => {
+if (e.key === "Enter") {
+document.getElementById("btn-join-room").click();
+}
+});
 
 const canvas = document.getElementById("gameCanvas");
 const ctx = canvas.getContext("2d");
@@ -119,7 +167,6 @@ ELBROWN: { name: "エル・プリモ", maxHp: 15000, speed: 3.5, radius: 21, col
 MORTIS: { name: "モーティス", maxHp: 8000, speed: 4.0, radius: 17, color: "#4e342e", attackType: "DASH", range: 110, spreadAngle: 0, ultType: "BAT_SWARM" }
 };
 
-// ジョイスティッククラス
 class Joystick {
 constructor(isLeft, isUlt = false) {
 this.isLeft = isLeft;
@@ -270,7 +317,6 @@ const angle = Math.atan2(dy, dx);
 char.facingAngle = angle;
 const cubeBonus = char.cubes * 100;
 
-// 通信同期用の基礎情報
 const syncBulletBase = {
 ownerId: char.id,
 isUlt: isUlt,
@@ -435,7 +481,6 @@ brawlers.push(player);
 for (let i = 0; i < 10; i++) { let sPos = getRandomSafePosition(16); sandbags.push({ x: sPos.x, y: sPos.y, hp: 7000, maxHp: 7000, radius: 16 }); }
 }
 
-// サーバー側に自分が出撃したことを送信
 socket.emit("joinGame", {
 type: selectedType,
 x: player.x,
@@ -712,7 +757,6 @@ resolveWallPushOut(c);
 c.x = Math.max(c.radius, Math.min(mapWidth - c.radius, c.x)); c.y = Math.max(c.radius, Math.min(mapHeight - c.radius, c.y));
 });
 
-// 自分のステータス変更をサーバーに同期
 if(player && player.hp > 0) {
 socket.emit("updateStatus", {
 x: player.x,
@@ -786,7 +830,7 @@ if (botIdx.type.attackType === "PUNCH" && minBDist > 120) isReadyToShoot = false
 
 if (isReadyToShoot && botIdx.shootCooldown <= 0) {
 if (botIdx.transparentUltEmit) {
-botIdx.ultActive = true;
+botIdx.bulletActive = true;
 if (botIdx.type.ultType === "JUMP") {
 fire(botIdx, targetBrawler.x - botIdx.x, targetBrawler.y - botIdx.y, Math.min(1.0, minBDist / 250));
 botIdx.aiTimer = 15; return;
@@ -840,7 +884,7 @@ break;
 }
 }
 }
-if (hitWall || b.traveled > b.range || b.x < 0 || b.x > mapWidth || b.y < 0 || b.y > mapHeight) { bullets.splice(i, 1); continue; }
+if (hitWall || b.traveled > b.range || b.x < 0 || b.x > mapWidth || b.y < 0 || b.y > mapWidth || b.y > mapHeight) { bullets.splice(i, 1); continue; }
 
 let hitRegistered = false;
 brawlers.forEach(target => {
@@ -994,7 +1038,7 @@ ctx.fillStyle = "#fff"; ctx.font = "20px sans-serif"; ctx.fillText("タッチし
 requestAnimationFrame(gameLoop);
 }
 
-// --- NETWORK SYNC (Socket.io受信イベント定義) ---
+// --- NETWORK SYNC ---
 
 socket.on("initGameState", (data) => {
 gameMode = data.gameMode;
@@ -1051,7 +1095,7 @@ target.cubes = data.cubes;
 });
 
 socket.on("remoteBulletFired", (data) => {
-if(data.ownerId === socket.id) return; // 自分の弾は生成済みのためスルー
+if(data.ownerId === socket.id) return;
 let launcher = brawlers.find(b => b.id === data.ownerId);
 if(!launcher) return;
 
